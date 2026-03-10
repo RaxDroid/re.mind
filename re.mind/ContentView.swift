@@ -30,7 +30,10 @@ struct ContentView: View {
                 }
                 ToolbarItem {
                     Button(action: addItem) {
-                        Label("Add Item", systemImage: "plus")
+                        HStack{
+                            Input("")
+                            Label("Add Item", systemImage: "plus"));
+                        }
                     }
                 }
             }
