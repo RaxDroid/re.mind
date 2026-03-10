@@ -2,8 +2,6 @@
 //  MapLinkMaker.swift
 //  re.mind
 //
-//  Created by Raul Sanchez on 9/3/26.
-//
 
 import Foundation
 
@@ -15,6 +13,8 @@ enum MapsProvider {
 
 enum MapsLinkBuilder {
 
+    // MARK: - Public: Search / Open Place
+
     static func url(for reminder: Reminder, provider: MapsProvider) -> URL? {
         if let geo = reminder.geolocation {
             return url(
@@ -25,43 +25,42 @@ enum MapsLinkBuilder {
             )
         }
 
-        if let place = reminder.place, !place.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return url(
-                provider: provider,
-                placeQuery: place
-            )
+        if let place = sanitized(reminder.place) {
+            return url(provider: provider, placeQuery: place)
         }
 
         return nil
     }
 
     static func url(provider: MapsProvider, placeQuery: String) -> URL? {
-        let query = placeQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return nil }
+        guard let query = sanitized(placeQuery) else { return nil }
 
         switch provider {
         case .appleMaps:
-            var components = URLComponents(string: "http://maps.apple.com/")
-            components?.queryItems = [
-                URLQueryItem(name: "q", value: query)
-            ]
-            return components?.url
+            return makeURL(
+                base: "http://maps.apple.com/",
+                queryItems: [
+                    URLQueryItem(name: "q", value: query)
+                ]
+            )
 
         case .googleMaps:
-            var components = URLComponents(string: "https://www.google.com/maps/search/")
-            components?.queryItems = [
-                URLQueryItem(name: "api", value: "1"),
-                URLQueryItem(name: "query", value: query)
-            ]
-            return components?.url
+            return makeURL(
+                base: "https://www.google.com/maps/search/",
+                queryItems: [
+                    URLQueryItem(name: "api", value: "1"),
+                    URLQueryItem(name: "query", value: query)
+                ]
+            )
 
         case .waze:
-            var components = URLComponents(string: "https://waze.com/ul")
-            components?.queryItems = [
-                URLQueryItem(name: "q", value: query),
-                URLQueryItem(name: "navigate", value: "yes")
-            ]
-            return components?.url
+            return makeURL(
+                base: "https://waze.com/ul",
+                queryItems: [
+                    URLQueryItem(name: "q", value: query),
+                    URLQueryItem(name: "navigate", value: "yes")
+                ]
+            )
         }
     }
 
@@ -71,30 +70,152 @@ enum MapsLinkBuilder {
         longitude: Double,
         label: String? = nil
     ) -> URL? {
+        let coordinateString = coordinateText(latitude: latitude, longitude: longitude)
+        let resolvedLabel = sanitized(label)
+
         switch provider {
         case .appleMaps:
-            var components = URLComponents(string: "http://maps.apple.com/")
-            components?.queryItems = [
-                URLQueryItem(name: "ll", value: "\(latitude),\(longitude)"),
-                URLQueryItem(name: "q", value: label ?? "\(latitude),\(longitude)")
-            ]
-            return components?.url
+            return makeURL(
+                base: "http://maps.apple.com/",
+                queryItems: [
+                    URLQueryItem(name: "ll", value: coordinateString),
+                    URLQueryItem(name: "q", value: resolvedLabel ?? coordinateString)
+                ]
+            )
 
         case .googleMaps:
-            var components = URLComponents(string: "https://www.google.com/maps/search/")
-            components?.queryItems = [
-                URLQueryItem(name: "api", value: "1"),
-                URLQueryItem(name: "query", value: "\(latitude),\(longitude)")
-            ]
-            return components?.url
+            return makeURL(
+                base: "https://www.google.com/maps/search/",
+                queryItems: [
+                    URLQueryItem(name: "api", value: "1"),
+                    URLQueryItem(name: "query", value: coordinateString)
+                ]
+            )
 
         case .waze:
-            var components = URLComponents(string: "https://waze.com/ul")
-            components?.queryItems = [
-                URLQueryItem(name: "ll", value: "\(latitude),\(longitude)"),
-                URLQueryItem(name: "navigate", value: "yes")
-            ]
-            return components?.url
+            return makeURL(
+                base: "https://waze.com/ul",
+                queryItems: [
+                    URLQueryItem(name: "ll", value: coordinateString),
+                    URLQueryItem(name: "navigate", value: "yes")
+                ]
+            )
         }
+    }
+
+    // MARK: - Public: Directions / Navigation
+
+    static func directionsURL(for reminder: Reminder, provider: MapsProvider) -> URL? {
+        if let geo = reminder.geolocation {
+            return directionsURL(
+                provider: provider,
+                latitude: geo.latitude,
+                longitude: geo.longitude
+            )
+        }
+
+        if let place = sanitized(reminder.place) {
+            return directionsURL(provider: provider, placeQuery: place)
+        }
+
+        return nil
+    }
+
+    static func directionsURL(provider: MapsProvider, placeQuery: String) -> URL? {
+        guard let query = sanitized(placeQuery) else { return nil }
+
+        switch provider {
+        case .appleMaps:
+            return makeURL(
+                base: "http://maps.apple.com/",
+                queryItems: [
+                    URLQueryItem(name: "daddr", value: query),
+                    URLQueryItem(name: "dirflg", value: "d")
+                ]
+            )
+
+        case .googleMaps:
+            return makeURL(
+                base: "https://www.google.com/maps/dir/",
+                queryItems: [
+                    URLQueryItem(name: "api", value: "1"),
+                    URLQueryItem(name: "destination", value: query),
+                    URLQueryItem(name: "travelmode", value: "driving")
+                ]
+            )
+
+        case .waze:
+            return makeURL(
+                base: "https://waze.com/ul",
+                queryItems: [
+                    URLQueryItem(name: "q", value: query),
+                    URLQueryItem(name: "navigate", value: "yes")
+                ]
+            )
+        }
+    }
+
+    static func directionsURL(
+        provider: MapsProvider,
+        latitude: Double,
+        longitude: Double
+    ) -> URL? {
+        let coordinateString = coordinateText(latitude: latitude, longitude: longitude)
+
+        switch provider {
+        case .appleMaps:
+            return makeURL(
+                base: "http://maps.apple.com/",
+                queryItems: [
+                    URLQueryItem(name: "daddr", value: coordinateString),
+                    URLQueryItem(name: "dirflg", value: "d")
+                ]
+            )
+
+        case .googleMaps:
+            return makeURL(
+                base: "https://www.google.com/maps/dir/",
+                queryItems: [
+                    URLQueryItem(name: "api", value: "1"),
+                    URLQueryItem(name: "destination", value: coordinateString),
+                    URLQueryItem(name: "travelmode", value: "driving")
+                ]
+            )
+
+        case .waze:
+            return makeURL(
+                base: "https://waze.com/ul",
+                queryItems: [
+                    URLQueryItem(name: "ll", value: coordinateString),
+                    URLQueryItem(name: "navigate", value: "yes")
+                ]
+            )
+        }
+    }
+}
+
+// MARK: - Helpers
+
+private extension MapsLinkBuilder {
+
+    static func makeURL(base: String, queryItems: [URLQueryItem]) -> URL? {
+        var components = URLComponents(string: base)
+        components?.queryItems = queryItems
+        return components?.url
+    }
+
+    static func sanitized(_ value: String?) -> String? {
+        guard let value else { return nil }
+
+        let trimmed = value
+            .replacingOccurrences(of: "\u{00A0}", with: " ")
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    static func coordinateText(latitude: Double, longitude: Double) -> String {
+        "\(latitude),\(longitude)"
     }
 }

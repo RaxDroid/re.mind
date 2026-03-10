@@ -2,125 +2,47 @@
 //  Geocoder.swift
 //  re.mind
 //
-//  Created by Raul Sanchez on 9/3/26.
-//
 
 import Foundation
-import CoreLocation
 import MapKit
 
-enum PlaceGeocodingError: Error, LocalizedError {
-    case emptyPlace
-    case notFound
-    case underlying(Error)
+enum PlaceGeocodingError: Error, LocalizedError, Equatable {
+    case emptyQuery
+    case noResults
+    case searchFailed(String)
 
     var errorDescription: String? {
         switch self {
-        case .emptyPlace:
-            return "The place string is empty."
-        case .notFound:
-            return "No location could be resolved for the provided place."
-        case .underlying(let error):
-            return error.localizedDescription
+        case .emptyQuery:
+            return "The place query is empty."
+        case .noResults:
+            return "No matching places were found."
+        case .searchFailed(let message):
+            return "Place search failed: \(message)"
         }
     }
 }
 
-struct PlaceResolutionResult {
+struct PlaceResolutionResult: Equatable {
     let originalQuery: String
     let displayName: String
     let geoLocation: GeoLocation
 }
 
+@MainActor
 final class PlaceGeocodingService {
 
     static let shared = PlaceGeocodingService()
 
-    private let geocoder = CLGeocoder()
-
     private init() {}
 
     func resolve(place: String) async throws -> PlaceResolutionResult {
-        let query = place.trimmingCharacters(in: .whitespacesAndNewlines)
+        let query = sanitize(place)
 
         guard !query.isEmpty else {
-            throw PlaceGeocodingError.emptyPlace
+            throw PlaceGeocodingError.emptyQuery
         }
 
-        if let result = try await resolveWithCLGeocoder(query: query) {
-            return result
-        }
-
-        if let result = try await resolveWithMKLocalSearch(query: query) {
-            return result
-        }
-
-        throw PlaceGeocodingError.notFound
-    }
-}
-
-private extension PlaceGeocodingService {
-
-    func resolveWithCLGeocoder(query: String) async throws -> PlaceResolutionResult? {
-        do {
-            let placemarks = try await geocoder.geocodeAddressString(query)
-
-            guard let placemark = placemarks.first,
-                  let location = placemark.location else {
-                return nil
-            }
-
-            let displayName = buildDisplayName(from: placemark, fallback: query)
-
-            return PlaceResolutionResult(
-                originalQuery: query,
-                displayName: displayName,
-                geoLocation: GeoLocation(
-                    latitude: location.coordinate.latitude,
-                    longitude: location.coordinate.longitude,
-                    resolvedAddress: displayName
-                )
-            )
-        } catch {
-            return nil
-        }
-    }
-
-    func buildDisplayName(from placemark: CLPlacemark, fallback: String) -> String {
-        let components = [
-            placemark.name,
-            placemark.thoroughfare,
-            placemark.subThoroughfare,
-            placemark.locality,
-            placemark.administrativeArea,
-            placemark.country
-        ]
-        .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
-        .filter { !$0.isEmpty }
-
-        let unique = orderedUnique(components)
-        return unique.isEmpty ? fallback : unique.joined(separator: ", ")
-    }
-
-    func orderedUnique(_ values: [String]) -> [String] {
-        var seen = Set<String>()
-        var result: [String] = []
-
-        for value in values {
-            let key = value.lowercased()
-            if !seen.contains(key) {
-                seen.insert(key)
-                result.append(value)
-            }
-        }
-
-        return result
-    }
-}
-
-private extension PlaceGeocodingService {
-
-    func resolveWithMKLocalSearch(query: String) async throws -> PlaceResolutionResult? {
         let request = MKLocalSearch.Request()
         request.naturalLanguageQuery = query
 
@@ -129,12 +51,12 @@ private extension PlaceGeocodingService {
         do {
             let response = try await search.start()
 
-            guard let item = response.mapItems.first else {
-                return nil
+            guard let bestMatch = bestMapItem(from: response.mapItems, originalQuery: query) else {
+                throw PlaceGeocodingError.noResults
             }
 
-            let coordinate = item.placemark.coordinate
-            let displayName = buildDisplayName(from: item, fallback: query)
+            let coordinate = bestMatch.location.coordinate
+            let displayName = buildDisplayName(from: bestMatch, fallback: query)
 
             return PlaceResolutionResult(
                 originalQuery: query,
@@ -145,25 +67,165 @@ private extension PlaceGeocodingService {
                     resolvedAddress: displayName
                 )
             )
+        } catch let error as PlaceGeocodingError {
+            throw error
         } catch {
-            throw PlaceGeocodingError.underlying(error)
+            throw PlaceGeocodingError.searchFailed(error.localizedDescription)
         }
     }
 
-    func buildDisplayName(from mapItem: MKMapItem, fallback: String) -> String {
-        let placemark = mapItem.placemark
+    func resolve(
+        place: String,
+        near region: MKCoordinateRegion
+    ) async throws -> PlaceResolutionResult {
+        let query = sanitize(place)
 
-        let components = [
-            mapItem.name,
-            placemark.title,
-            placemark.locality,
-            placemark.administrativeArea,
-            placemark.country
-        ]
-        .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
-        .filter { !$0.isEmpty }
+        guard !query.isEmpty else {
+            throw PlaceGeocodingError.emptyQuery
+        }
 
-        let unique = orderedUnique(components)
-        return unique.isEmpty ? fallback : unique.joined(separator: ", ")
+        let request = MKLocalSearch.Request()
+        request.naturalLanguageQuery = query
+        request.region = region
+        request.regionPriority = .required
+
+        let search = MKLocalSearch(request: request)
+
+        do {
+            let response = try await search.start()
+
+            guard let bestMatch = bestMapItem(from: response.mapItems, originalQuery: query) else {
+                throw PlaceGeocodingError.noResults
+            }
+
+            let coordinate = bestMatch.location.coordinate
+            let displayName = buildDisplayName(from: bestMatch, fallback: query)
+
+            return PlaceResolutionResult(
+                originalQuery: query,
+                displayName: displayName,
+                geoLocation: GeoLocation(
+                    latitude: coordinate.latitude,
+                    longitude: coordinate.longitude,
+                    resolvedAddress: displayName
+                )
+            )
+        } catch let error as PlaceGeocodingError {
+            throw error
+        } catch {
+            throw PlaceGeocodingError.searchFailed(error.localizedDescription)
+        }
+    }
+}
+
+private extension PlaceGeocodingService {
+
+    func sanitize(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "\u{00A0}", with: " ")
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    func bestMapItem(from items: [MKMapItem], originalQuery: String) -> MKMapItem? {
+        guard !items.isEmpty else { return nil }
+
+        let normalizedQuery = normalizeForComparison(originalQuery)
+
+        return items.max { lhs, rhs in
+            score(lhs, against: normalizedQuery) < score(rhs, against: normalizedQuery)
+        }
+    }
+
+    func score(_ item: MKMapItem, against normalizedQuery: String) -> Int {
+        var total = 0
+
+        let name = normalizeForComparison(item.name ?? "")
+        let display = normalizeForComparison(buildDisplayName(from: item, fallback: ""))
+
+        if !name.isEmpty {
+            if name == normalizedQuery { total += 1000 }
+            if name.contains(normalizedQuery) { total += 400 }
+            if normalizedQuery.contains(name) { total += 250 }
+        }
+
+        if !display.isEmpty {
+            if display == normalizedQuery { total += 700 }
+            if display.contains(normalizedQuery) { total += 250 }
+        }
+
+        total += 100 // MKMapItem.location is available here in your SDK
+
+        return total
+    }
+
+    func normalizeForComparison(_ text: String) -> String {
+        text
+            .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "es_DO"))
+            .lowercased()
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    func buildDisplayName(from item: MKMapItem, fallback: String) -> String {
+        var parts: [String] = []
+
+        if let name = normalized(item.name) {
+            parts.append(name)
+        }
+
+        if let address = item.address {
+            if let short = normalized(address.shortAddress) {
+                parts.append(short)
+            }
+
+            if let full = normalized(address.fullAddress) {
+                parts.append(full)
+            }
+        }
+
+        if #available(iOS 26.0, *) {
+            if let representations = item.addressRepresentations {
+                if let city = normalized(representations.cityWithContext) {
+                    parts.append(city)
+                }
+
+                if let fullNoRegion = normalized(
+                    representations.fullAddress(includingRegion: false, singleLine: true)
+                ) {
+                    parts.append(fullNoRegion)
+                }
+
+                if let fullWithRegion = normalized(
+                    representations.fullAddress(includingRegion: true, singleLine: true)
+                ) {
+                    parts.append(fullWithRegion)
+                }
+            }
+        }
+
+        let unique = orderedUnique(parts)
+        return unique.isEmpty ? fallback : unique.first ?? fallback
+    }
+
+    func normalized(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    func orderedUnique(_ values: [String]) -> [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+
+        for value in values {
+            let key = normalizeForComparison(value)
+            if !key.isEmpty, !seen.contains(key) {
+                seen.insert(key)
+                result.append(value)
+            }
+        }
+
+        return result
     }
 }
